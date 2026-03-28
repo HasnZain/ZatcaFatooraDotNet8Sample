@@ -1,0 +1,63 @@
+@host = http://localhost:5107
+
+### Generate CSR
+POST {{host}}/api/csr/generate
+Content-Type: application/json
+
+{
+  "commonName": "300000000000003",
+  "organizationName": "My Company LLC",
+  "organizationalUnitName": "Main Branch",
+  "countryCode": "SA",
+  "emailAddress": "dev@example.com",
+  "serialNumber": "1-TST|2-TST|3-1234567890",
+  "organizationIdentifier": "311111111100003"
+}
+
+### Compliance CSID
+POST {{host}}/api/onboarding/compliance-csid
+Content-Type: application/json
+
+{
+  "otp": "123456"
+}
+
+### Generate Standard Invoice
+POST {{host}}/api/invoices/generate
+Content-Type: application/json
+
+{
+  "invoiceNumber": "INV-1001",
+  "invoiceCategory": "Standard",
+  "invoiceTypeCode": "388",
+  "seller": {
+    "registrationName": "My Company LLC",
+    "vatNumber": "311111111100003",
+    "registrationNumber": "1010101010",
+    "streetName": "King Fahd Road",
+    "buildingNumber": "1234",
+    "cityName": "Riyadh",
+    "postalZone": "12345",
+    "countryCode": "SA"
+  },
+  "buyer": {
+    "registrationName": "Customer Company",
+    "vatNumber": "399999999900003",
+    "registrationNumber": "7000000000",
+    "streetName": "Olaya Street",
+    "cityName": "Riyadh",
+    "postalZone": "12211",
+    "countryCode": "SA"
+  },
+  "lines": [
+    {
+      "name": "Consulting Service",
+      "quantity": 1,
+      "unitPrice": 100,
+      "discountAmount": 0,
+      "taxRate": 15,
+      "taxCategoryCode": "S",
+      "unitCode": "PCE"
+    }
+  ]
+}
