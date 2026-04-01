@@ -9,17 +9,23 @@ namespace ZatcaFatooraDotNet8Sample.Services;
 
 public sealed class InvoiceSignerService
 {
+    // ECDSA-SHA256 signature method URI as defined in RFC 4051 / W3C XML-DSig-more
+    private const string XmlDsigEcdsaSha256Url = "http://www.w3.org/2001/04/xmldsig-more#ecdsa-sha256";
+
     public SignedInvoiceArtifacts Sign(string unsignedXml, string privateKeyPem, string? binarySecurityToken)
     {
         var invoiceHashBase64 = ComputeInvoiceHash(unsignedXml);
 
-        using var rsa = RSA.Create();
-        rsa.ImportFromPem(privateKeyPem);
+        // ZATCA requires ECDSA (secp256k1) — the private key exported by CsrGeneratorService is EC,
+        // so we must import it as ECDsa, not RSA.
+        using var ecdsa = ECDsa.Create();
+        ecdsa.ImportFromPem(privateKeyPem);
 
         var hashBytes = Convert.FromBase64String(invoiceHashBase64);
-        var signatureBase64 = Convert.ToBase64String(rsa.SignHash(hashBytes, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1));
+        // ECDsa.SignHash uses the curve's native algorithm; no padding parameter needed.
+        var signatureBase64 = Convert.ToBase64String(ecdsa.SignHash(hashBytes));
 
-        var signedXml = ApplyXmlSignature(unsignedXml, rsa, binarySecurityToken);
+        var signedXml = ApplyXmlSignature(unsignedXml, ecdsa, binarySecurityToken);
 
         string? publicKeyBase64 = null;
         string? certificateSignatureBase64 = null;
@@ -28,6 +34,8 @@ public sealed class InvoiceSignerService
         {
             var certificate = new X509Certificate2(Convert.FromBase64String(binarySecurityToken));
             publicKeyBase64 = Convert.ToBase64String(certificate.GetPublicKey());
+            // Tag 9 of the ZATCA QR is the certificate's own digital signature bytes.
+            certificateSignatureBase64 = Convert.ToBase64String(certificate.GetCertHash(HashAlgorithmName.SHA256));
         }
 
         return new SignedInvoiceArtifacts
@@ -54,7 +62,7 @@ public sealed class InvoiceSignerService
         return Convert.ToBase64String(hashBytes);
     }
 
-    private static string ApplyXmlSignature(string xml, RSA rsa, string? binarySecurityToken)
+    private static string ApplyXmlSignature(string xml, ECDsa ecdsa, string? binarySecurityToken)
     {
         var document = new XmlDocument
         {
@@ -64,11 +72,11 @@ public sealed class InvoiceSignerService
 
         var signedXml = new SignedXml(document)
         {
-            SigningKey = rsa,
+            SigningKey = ecdsa,
             SignedInfo =
             {
                 CanonicalizationMethod = SignedXml.XmlDsigCanonicalizationUrl,
-                SignatureMethod = SignedXml.XmlDsigRSASHA256Url
+                SignatureMethod = XmlDsigEcdsaSha256Url
             }
         };
 

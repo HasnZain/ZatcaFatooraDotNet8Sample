@@ -11,7 +11,9 @@ public sealed class CsrController : ControllerBase
     private readonly CsrGeneratorService _csrGeneratorService;
     private readonly DeviceStateStoreService _deviceStateStoreService;
 
-    public CsrController(CsrGeneratorService csrGeneratorService, DeviceStateStoreService deviceStateStoreService)
+    public CsrController(
+        CsrGeneratorService csrGeneratorService,
+        DeviceStateStoreService deviceStateStoreService)
     {
         _csrGeneratorService = csrGeneratorService;
         _deviceStateStoreService = deviceStateStoreService;
@@ -28,8 +30,7 @@ public sealed class CsrController : ControllerBase
         var csr = _csrGeneratorService.Generate(request);
 
         var state = await _deviceStateStoreService.LoadAsync(cancellationToken);
-
-        state.SubjectName = csr.SubjectDebug; // rename later to SubjectDebug if you want
+        state.SubjectName = csr.SubjectDebug;
         state.PrivateKeyPem = csr.PrivateKeyPem;
         state.PublicKeyPem = csr.PublicKeyPem;
         state.CsrPem = csr.CsrPem;
