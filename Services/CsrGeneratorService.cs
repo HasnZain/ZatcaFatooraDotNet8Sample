@@ -367,10 +367,10 @@ public sealed class CsrGeneratorService
     private const string Secp256k1Oid = "1.3.132.0.10";
     private const string CertificateTemplateNameOid = "1.3.6.1.4.1.311.20.2";
     private const string SubjectAltNameOid = "2.5.29.17";
-    private const string ComplianceTemplateName = "PREZATCA-Code-Signing";
+    private const string ComplianceTemplateName = "ZATCA-Code-Signing";
 
     private const string CountryOid = "2.5.4.6";
-    private const string SerialNumberOid = "2.5.4.5";
+    private const string SerialNumberOid = "2.5.4.4";
     private const string OrganizationOid = "2.5.4.10";
     private const string OrganizationalUnitOid = "2.5.4.11";
     private const string CommonNameOid = "2.5.4.3";
