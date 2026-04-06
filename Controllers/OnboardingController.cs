@@ -32,7 +32,7 @@ public sealed class OnboardingController : ControllerBase
 
         if (response is not null)
         {
-            state.ComplianceRequestId = response.RequestId;
+            state.ComplianceRequestId = response.RequestId.ToString();
             state.ComplianceBinarySecurityToken = response.BinarySecurityToken;
             state.ComplianceSecret = response.Secret;
             await _deviceStateStoreService.SaveAsync(state, cancellationToken);

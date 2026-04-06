@@ -84,6 +84,7 @@ public sealed class ZatcaApiClient
         var request = new HttpRequestMessage(method, relativeUrl.TrimStart('/'));
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
         request.Headers.Add("Accept-Version", _settings.AcceptVersion);
+        request.Headers.Add("Accept-Language", "EN"); // ZATCA requires EN or AR
         request.Content = new StringContent(JsonSerializer.Serialize(body, JsonOptions), Encoding.UTF8, "application/json");
         return request;
     }
