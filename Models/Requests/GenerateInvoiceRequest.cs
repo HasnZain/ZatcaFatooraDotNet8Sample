@@ -39,6 +39,9 @@ public sealed class GenerateInvoiceRequest : IValidatableObject
     public string PaymentMeansCode { get; set; } = "10";
 
     public string? Notes { get; set; }
+
+    /// <summary>Optional <c>languageID</c> on UBL <c>cbc:Note</c> (ZATCA SDK sample uses <c>ar</c>).</summary>
+    public string? NoteLanguageId { get; set; }
     public string? PreviousInvoiceHashBase64 { get; set; }
     public long? InvoiceCounterValue { get; set; }
 

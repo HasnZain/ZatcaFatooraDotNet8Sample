@@ -1,5 +1,6 @@
 ﻿using System.Globalization;
 using System.Text;
+using System.Xml;
 using System.Xml.Linq;
 using Microsoft.Extensions.Options;
 using ZatcaFatooraDotNet8Sample.Models.Configuration;
@@ -41,20 +42,16 @@ public sealed class InvoiceXmlBuilderService
         var certificateToken = ResolveCertificateToken(state);
         var totals = CalculateTotals(request.Lines);
 
-        // Pass 1: sign without QR
-        var xml1 = BuildUnsignedXml(request, uuid, issueDateTime, icv, previousInvoiceHashBase64, string.Empty);
-        var signed1 = signer.Sign(xml1, state.PrivateKeyPem, certificateToken);
+        // Single-pass: sign XML with an empty QR payload (QR is excluded from the invoice ds:Reference digest).
+        var unsignedXml = BuildUnsignedXml(request, uuid, issueDateTime, icv, previousInvoiceHashBase64, string.Empty);
+        var signed = signer.Sign(unsignedXml, state.PrivateKeyPem, certificateToken);
 
-        // Pass 2: build provisional QR and re-sign
-        var qr2 = BuildQr(request, issueDateTime, totals, signed1);
-        var xml2 = BuildUnsignedXml(request, uuid, issueDateTime, icv, previousInvoiceHashBase64, qr2);
-        var signed2 = signer.Sign(xml2, state.PrivateKeyPem, certificateToken);
+        // QR tags 6–7 use the invoice reference DigestValue and ds:SignatureValue from this signature (see Signer).
+        var qrBase64 = BuildQr(request, issueDateTime, totals, signed);
+        var signedXmlFinal = ReplaceQrEmbeddedPayload(signed.SignedXml, qrBase64);
 
-        // Pass 3: rebuild QR with the new signature value and do final sign
-        // (SignatureValue changes between passes because the XML content changed)
-        var qr3 = BuildQr(request, issueDateTime, totals, signed2);
-        var xml3 = BuildUnsignedXml(request, uuid, issueDateTime, icv, previousInvoiceHashBase64, qr3);
-        var signed3 = signer.Sign(xml3, state.PrivateKeyPem, certificateToken);
+        var unsignedXmlWithQr = BuildUnsignedXml(
+            request, uuid, issueDateTime, icv, previousInvoiceHashBase64, qrBase64);
 
         return new InvoiceBuildResult
         {
@@ -62,12 +59,12 @@ public sealed class InvoiceXmlBuilderService
             Uuid = uuid,
             InvoiceCounterValue = icv,
             PreviousInvoiceHashBase64 = previousInvoiceHashBase64,
-            UnsignedXml = xml3,
-            SignedXml = signed3.SignedXml,
-            InvoiceHashBase64 = signed3.InvoiceHashBase64,
-            SignatureBase64 = signed3.SignatureBase64,
-            QrCodeBase64 = qr3,
-            InvoiceBase64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(signed3.SignedXml)),
+            UnsignedXml = unsignedXmlWithQr,
+            SignedXml = signedXmlFinal,
+            InvoiceHashBase64 = signed.InvoiceHashBase64,
+            SignatureBase64 = signed.SignatureBase64,
+            QrCodeBase64 = qrBase64,
+            InvoiceBase64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(signedXmlFinal)),
             TaxExclusiveAmount = totals.TaxExclusiveAmount,
             TaxInclusiveAmount = totals.TaxInclusiveAmount,
             TotalTaxAmount = totals.TotalTaxAmount
@@ -104,9 +101,6 @@ public sealed class InvoiceXmlBuilderService
         XNamespace cbc = "urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2";
         XNamespace cac = "urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2";
         XNamespace ext = "urn:oasis:names:specification:ubl:schema:xsd:CommonExtensionComponents-2";
-        XNamespace sig = "urn:oasis:names:specification:ubl:schema:xsd:CommonSignatureComponents-2";
-        XNamespace sac = "urn:oasis:names:specification:ubl:schema:xsd:SignatureAggregateComponents-2";
-        XNamespace sbc = "urn:oasis:names:specification:ubl:schema:xsd:SignatureBasicComponents-2";
 
         var isSimplified = request.InvoiceCategory.Equals("Simplified", StringComparison.OrdinalIgnoreCase);
         var isStandard = !isSimplified;
@@ -135,25 +129,33 @@ public sealed class InvoiceXmlBuilderService
         if (isCreditOrDebitNote && string.IsNullOrWhiteSpace(request.CreditDebitReason))
             throw new InvalidOperationException("CreditDebitReason is required for credit/debit notes.");
 
-        var customerParty = request.Buyer ?? CreateSimplifiedCustomerPlaceholder(request);
         var totals = CalculateTotals(request.Lines);
+
+        // SDK sample is a normal simplified tax invoice (388): no UBLVersionID/CustomizationID, etc.
+        bool simplifiedSdkLayout = isSimplified
+            && !isCreditOrDebitNote
+            && string.Equals(currencyCode, taxCurrencyCode, StringComparison.OrdinalIgnoreCase);
+
+        var includeUblVersionAndCustomization = !simplifiedSdkLayout;
 
         var invoice = new XElement(
             invoiceNs + "Invoice",
-            new XAttribute(XNamespace.Xmlns + "cbc", cbc),
-            new XAttribute(XNamespace.Xmlns + "cac", cac),
-            new XAttribute(XNamespace.Xmlns + "ext", ext),
-            new XAttribute(XNamespace.Xmlns + "sig", sig),
-            new XAttribute(XNamespace.Xmlns + "sac", sac),
-            new XAttribute(XNamespace.Xmlns + "sbc", sbc),
+            new XAttribute(XNamespace.Xmlns + "cac", cac.NamespaceName),
+            new XAttribute(XNamespace.Xmlns + "cbc", cbc.NamespaceName),
+            new XAttribute(XNamespace.Xmlns + "ext", ext.NamespaceName),
 
             new XElement(ext + "UBLExtensions",
                 new XElement(ext + "UBLExtension",
                     new XElement(ext + "ExtensionURI", "urn:oasis:names:specification:ubl:dsig:enveloped:xades"),
                     new XElement(ext + "ExtensionContent"))),
 
-            new XElement(cbc + "UBLVersionID", "2.1"),
-            new XElement(cbc + "CustomizationID", "urn:zatca:invoice:1.0"),
+            includeUblVersionAndCustomization
+                ? new XElement(cbc + "UBLVersionID", "2.1")
+                : null,
+            includeUblVersionAndCustomization
+                ? new XElement(cbc + "CustomizationID", "urn:zatca:invoice:1.0")
+                : null,
+
             new XElement(cbc + "ProfileID", "reporting:1.0"),
             new XElement(cbc + "ID", request.InvoiceNumber),
             new XElement(cbc + "UUID", uuid),
@@ -164,7 +166,7 @@ public sealed class InvoiceXmlBuilderService
                 new XAttribute("name", invoiceTypeName),
                 request.InvoiceTypeCode),
 
-            string.IsNullOrWhiteSpace(request.Notes) ? null : new XElement(cbc + "Note", request.Notes),
+            BuildNoteElement(cbc, request),
 
             new XElement(cbc + "DocumentCurrencyCode", currencyCode),
             new XElement(cbc + "TaxCurrencyCode", taxCurrencyCode),
@@ -189,7 +191,11 @@ public sealed class InvoiceXmlBuilderService
                 new XElement(cbc + "SignatureMethod", "urn:oasis:names:specification:ubl:dsig:enveloped:xades")),
 
             new XElement(cac + "AccountingSupplierParty", BuildPartyElement(cac, cbc, request.Seller)),
-            new XElement(cac + "AccountingCustomerParty", BuildPartyElement(cac, cbc, customerParty)),
+
+            (isSimplified && !isCreditOrDebitNote)
+                ? new XElement(cac + "AccountingCustomerParty")
+                : new XElement(cac + "AccountingCustomerParty",
+                    request.Buyer is null ? null : BuildPartyElement(cac, cbc, request.Buyer)),
 
             new XElement(cac + "PaymentMeans",
                 new XElement(cbc + "PaymentMeansCode", request.PaymentMeansCode),
@@ -197,63 +203,187 @@ public sealed class InvoiceXmlBuilderService
                     ? new XElement(cbc + "InstructionNote", request.CreditDebitReason)
                     : null),
 
-            // ── TaxTotal rules ────────────────────────────────────────────────────────
-            //
-            // BOTH simplified and standard invoices must have ONE TaxTotal WITH TaxSubtotals.
-            // BR-KSA-EN16931-08: "Only one tax total (BG-22) with tax subtotals must be provided."
-            // BR-CO-18: "An Invoice shall at least have one VAT breakdown group (BG-23)."
-            //
-            // The previous BR-KSA-EN16931-09 warning ("without tax subtotals") was for a
-            // different scenario (when two TaxTotal blocks are present). The fix is:
-            // always emit exactly ONE TaxTotal WITH TaxSubtotals for both invoice types.
-            // A second TaxTotal (no subtotals, in taxCurrencyCode) is only needed when
-            // DocumentCurrencyCode != TaxCurrencyCode.
-            BuildTaxTotalElements(cac, cbc, currencyCode, taxCurrencyCode, totals, request.Lines),
+            simplifiedSdkLayout ? BuildSdkStyleAllowanceCharge(cac, cbc, currencyCode) : null,
 
-            new XElement(cac + "LegalMonetaryTotal",
-                new XElement(cbc + "LineExtensionAmount",
-                    new XAttribute("currencyID", currencyCode), FormatAmount(totals.LineExtensionAmount)),
-                new XElement(cbc + "TaxExclusiveAmount",
-                    new XAttribute("currencyID", currencyCode), FormatAmount(totals.TaxExclusiveAmount)),
-                new XElement(cbc + "TaxInclusiveAmount",
-                    new XAttribute("currencyID", currencyCode), FormatAmount(totals.TaxInclusiveAmount)),
-                new XElement(cbc + "PayableAmount",
-                    new XAttribute("currencyID", currencyCode), FormatAmount(totals.TaxInclusiveAmount))),
+            simplifiedSdkLayout
+                ? BuildSimplifiedSdkStyleTaxTotals(cac, cbc, currencyCode, totals, request.Lines)
+                : BuildTaxTotalElements(cac, cbc, currencyCode, taxCurrencyCode, totals, request.Lines),
+
+            simplifiedSdkLayout
+                ? BuildSimplifiedSdkLegalMonetaryTotal(cac, cbc, currencyCode, totals)
+                : new XElement(cac + "LegalMonetaryTotal",
+                    new XElement(cbc + "LineExtensionAmount",
+                        new XAttribute("currencyID", currencyCode), FormatAmount(totals.LineExtensionAmount)),
+                    new XElement(cbc + "TaxExclusiveAmount",
+                        new XAttribute("currencyID", currencyCode), FormatAmount(totals.TaxExclusiveAmount)),
+                    new XElement(cbc + "TaxInclusiveAmount",
+                        new XAttribute("currencyID", currencyCode), FormatAmount(totals.TaxInclusiveAmount)),
+                    new XElement(cbc + "PayableAmount",
+                        new XAttribute("currencyID", currencyCode), FormatAmount(totals.TaxInclusiveAmount))),
 
             request.Lines.Select((line, index) =>
-                new XElement(cac + "InvoiceLine",
-                    new XElement(cbc + "ID", (index + 1).ToString(CultureInfo.InvariantCulture)),
-                    new XElement(cbc + "InvoicedQuantity",
-                        new XAttribute("unitCode", line.UnitCode),
-                        line.Quantity.ToString("0.##", CultureInfo.InvariantCulture)),
-                    new XElement(cbc + "LineExtensionAmount",
-                        new XAttribute("currencyID", currencyCode), FormatAmount(GetLineNetAmount(line))),
-                    new XElement(cac + "TaxTotal",
-                        new XElement(cbc + "TaxAmount",
-                            new XAttribute("currencyID", taxCurrencyCode), FormatAmount(GetLineTaxAmount(line))),
-                        new XElement(cbc + "RoundingAmount",
-                            new XAttribute("currencyID", currencyCode), FormatAmount(GetLineGrossAmount(line)))),
-                    new XElement(cac + "Item",
-                        new XElement(cbc + "Name", line.Name),
-                        new XElement(cac + "ClassifiedTaxCategory",
-                            new XElement(cbc + "ID", line.TaxCategoryCode),
-                            new XElement(cbc + "Percent", line.TaxRate.ToString("0.00", CultureInfo.InvariantCulture)),
-                            new XElement(cac + "TaxScheme",
-                                new XElement(cbc + "ID", "VAT")))),
-                    new XElement(cac + "Price",
-                        new XElement(cbc + "PriceAmount",
-                            new XAttribute("currencyID", currencyCode), FormatPrice(GetNetUnitPrice(line))),
-                        new XElement(cbc + "BaseQuantity",
-                            new XAttribute("unitCode", line.UnitCode), "1"))))
+                BuildInvoiceLineElement(cac, cbc, currencyCode, taxCurrencyCode, line, index, simplifiedSdkLayout))
         );
 
-        var document = new XDocument(new XDeclaration("1.0", "utf-8", "yes"), invoice);
+        var document = new XDocument(
+            new XDeclaration("1.0", simplifiedSdkLayout ? "UTF-8" : "utf-8", simplifiedSdkLayout ? null : "yes"),
+            invoice);
         var utf8NoBom = new UTF8Encoding(false);
         using var stream = new MemoryStream();
         using var writer = new StreamWriter(stream, utf8NoBom);
         document.Save(writer, SaveOptions.DisableFormatting);
         writer.Flush();
         return utf8NoBom.GetString(stream.ToArray());
+    }
+
+    private static XElement? BuildNoteElement(XNamespace cbc, GenerateInvoiceRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(request.Notes))
+            return null;
+
+        var lang = request.NoteLanguageId;
+        if (string.IsNullOrWhiteSpace(lang)
+            && string.Equals(request.InvoiceCategory, "Simplified", StringComparison.OrdinalIgnoreCase))
+            lang = "ar";
+
+        return string.IsNullOrWhiteSpace(lang)
+            ? new XElement(cbc + "Note", request.Notes)
+            : new XElement(cbc + "Note", new XAttribute("languageID", lang), request.Notes);
+    }
+
+    /// <summary>ZATCA Java SDK simplified sample: zero discount allowance with UN/ECE tax categories (duplicated).</summary>
+    private static XElement BuildSdkStyleAllowanceCharge(XNamespace cac, XNamespace cbc, string currencyCode)
+    {
+        XElement taxCategory() => new XElement(cac + "TaxCategory",
+            new XElement(cbc + "ID",
+                new XAttribute("schemeID", "UN/ECE 5305"),
+                new XAttribute("schemeAgencyID", "6"),
+                "S"),
+            new XElement(cbc + "Percent", "15"),
+            new XElement(cac + "TaxScheme",
+                new XElement(cbc + "ID",
+                    new XAttribute("schemeID", "UN/ECE 5153"),
+                    new XAttribute("schemeAgencyID", "6"),
+                    "VAT")));
+
+        return new XElement(cac + "AllowanceCharge",
+            new XElement(cbc + "ChargeIndicator", "false"),
+            new XElement(cbc + "AllowanceChargeReason", "discount"),
+            new XElement(cbc + "Amount", new XAttribute("currencyID", currencyCode), "0.00"),
+            taxCategory(),
+            taxCategory());
+    }
+
+    /// <summary>Two <c>cac:TaxTotal</c> blocks as in ZATCA SDK simplified sample (summary, then breakdown).</summary>
+    private static object[] BuildSimplifiedSdkStyleTaxTotals(
+        XNamespace cac,
+        XNamespace cbc,
+        string currencyCode,
+        (decimal LineExtensionAmount, decimal TaxExclusiveAmount, decimal TaxInclusiveAmount, decimal TotalTaxAmount, decimal AllowanceTotalAmount) totals,
+        List<InvoiceLineItem> lines)
+    {
+        var primaryLine = lines[0];
+        var summary = new XElement(cac + "TaxTotal",
+            new XElement(cbc + "TaxAmount",
+                new XAttribute("currencyID", currencyCode),
+                FormatAmount(totals.TotalTaxAmount)));
+
+        var detail = new XElement(cac + "TaxTotal",
+            new XElement(cbc + "TaxAmount",
+                new XAttribute("currencyID", currencyCode),
+                FormatAmount(totals.TotalTaxAmount)),
+            new XElement(cac + "TaxSubtotal",
+                new XElement(cbc + "TaxableAmount",
+                    new XAttribute("currencyID", currencyCode),
+                    FormatAmount(totals.TaxExclusiveAmount)),
+                new XElement(cbc + "TaxAmount",
+                    new XAttribute("currencyID", currencyCode),
+                    FormatAmount(totals.TotalTaxAmount)),
+                new XElement(cac + "TaxCategory",
+                    new XElement(cbc + "ID",
+                        new XAttribute("schemeID", "UN/ECE 5305"),
+                        new XAttribute("schemeAgencyID", "6"),
+                        primaryLine.TaxCategoryCode),
+                    new XElement(cbc + "Percent", primaryLine.TaxRate.ToString("0.00", CultureInfo.InvariantCulture)),
+                    new XElement(cac + "TaxScheme",
+                        new XElement(cbc + "ID",
+                            new XAttribute("schemeID", "UN/ECE 5153"),
+                            new XAttribute("schemeAgencyID", "6"),
+                            "VAT")))));
+
+        return new object[] { summary, detail };
+    }
+
+    private static XElement BuildSimplifiedSdkLegalMonetaryTotal(
+        XNamespace cac,
+        XNamespace cbc,
+        string currencyCode,
+        (decimal LineExtensionAmount, decimal TaxExclusiveAmount, decimal TaxInclusiveAmount, decimal TotalTaxAmount, decimal AllowanceTotalAmount) totals)
+    {
+        return new XElement(cac + "LegalMonetaryTotal",
+            new XElement(cbc + "LineExtensionAmount",
+                new XAttribute("currencyID", currencyCode), FormatAmount(totals.LineExtensionAmount)),
+            new XElement(cbc + "TaxExclusiveAmount",
+                new XAttribute("currencyID", currencyCode), FormatAmount(totals.TaxExclusiveAmount)),
+            new XElement(cbc + "TaxInclusiveAmount",
+                new XAttribute("currencyID", currencyCode), FormatAmount(totals.TaxInclusiveAmount)),
+            new XElement(cbc + "AllowanceTotalAmount",
+                new XAttribute("currencyID", currencyCode), "0.00"),
+            new XElement(cbc + "PrepaidAmount",
+                new XAttribute("currencyID", currencyCode), "0.00"),
+            new XElement(cbc + "PayableAmount",
+                new XAttribute("currencyID", currencyCode), FormatAmount(totals.TaxInclusiveAmount)));
+    }
+
+    private static XElement BuildInvoiceLineElement(
+        XNamespace cac,
+        XNamespace cbc,
+        string currencyCode,
+        string taxCurrencyCode,
+        InvoiceLineItem line,
+        int index,
+        bool simplifiedSdkLayout)
+    {
+        var id = (index + 1).ToString(CultureInfo.InvariantCulture);
+        var qtyFormat = simplifiedSdkLayout ? "0.000000" : "0.##";
+        var quantityString = line.Quantity.ToString(qtyFormat, CultureInfo.InvariantCulture);
+
+        var priceEl = simplifiedSdkLayout
+            ? new XElement(cac + "Price",
+                new XElement(cbc + "PriceAmount",
+                    new XAttribute("currencyID", currencyCode),
+                    FormatPrice(GetNetUnitPrice(line))))
+            : new XElement(cac + "Price",
+                new XElement(cbc + "PriceAmount",
+                    new XAttribute("currencyID", currencyCode),
+                    FormatPrice(GetNetUnitPrice(line))),
+                new XElement(cbc + "BaseQuantity",
+                    new XAttribute("unitCode", line.UnitCode),
+                    "1"));
+
+        return new XElement(cac + "InvoiceLine",
+            new XElement(cbc + "ID", id),
+            new XElement(cbc + "InvoicedQuantity",
+                new XAttribute("unitCode", line.UnitCode),
+                quantityString),
+            new XElement(cbc + "LineExtensionAmount",
+                new XAttribute("currencyID", currencyCode),
+                FormatAmount(GetLineNetAmount(line))),
+            new XElement(cac + "TaxTotal",
+                new XElement(cbc + "TaxAmount",
+                    new XAttribute("currencyID", taxCurrencyCode),
+                    FormatAmount(GetLineTaxAmount(line))),
+                new XElement(cbc + "RoundingAmount",
+                    new XAttribute("currencyID", currencyCode),
+                    FormatAmount(GetLineGrossAmount(line)))),
+            new XElement(cac + "Item",
+                new XElement(cbc + "Name", line.Name),
+                new XElement(cac + "ClassifiedTaxCategory",
+                    new XElement(cbc + "ID", line.TaxCategoryCode),
+                    new XElement(cbc + "Percent", line.TaxRate.ToString("0.00", CultureInfo.InvariantCulture)),
+                    new XElement(cac + "TaxScheme",
+                        new XElement(cbc + "ID", "VAT")))),
+            priceEl);
     }
 
     /// <summary>
@@ -295,28 +425,20 @@ public sealed class InvoiceXmlBuilderService
                         new XElement(cac + "TaxScheme",
                             new XElement(cbc + "ID", "VAT"))))));
 
-        if (string.Equals(currencyCode, taxCurrencyCode, StringComparison.OrdinalIgnoreCase))
+        // Emit a second TaxTotal (without subtotals) only for true multi-currency scenarios.
+        bool needSecondTaxTotal = !string.Equals(currencyCode, taxCurrencyCode, StringComparison.OrdinalIgnoreCase);
+
+        if (!needSecondTaxTotal)
             return primaryTaxTotal;
 
         // Multi-currency: second TaxTotal in taxCurrencyCode, no subtotals
         return new object[]
         {
-            primaryTaxTotal,
-            new XElement(cac + "TaxTotal",
-                new XElement(cbc + "TaxAmount",
-                    new XAttribute("currencyID", taxCurrencyCode),
-                    FormatAmount(totals.TotalTaxAmount)))
-        };
-    }
-
-    private static PartyInfo CreateSimplifiedCustomerPlaceholder(GenerateInvoiceRequest request)
-    {
-        if (!request.InvoiceCategory.Equals("Simplified", StringComparison.OrdinalIgnoreCase))
-            throw new InvalidOperationException("Buyer is required for non-simplified invoices.");
-        return new PartyInfo
-        {
-            RegistrationName = "Walk-in Customer",
-            CountryCode = string.IsNullOrWhiteSpace(request.Seller?.CountryCode) ? "SA" : request.Seller.CountryCode
+        primaryTaxTotal,
+        new XElement(cac + "TaxTotal",
+            new XElement(cbc + "TaxAmount",
+                new XAttribute("currencyID", taxCurrencyCode),
+                FormatAmount(totals.TotalTaxAmount)))
         };
     }
 
@@ -358,13 +480,39 @@ public sealed class InvoiceXmlBuilderService
     private static XElement BuildAdditionalDocumentReference(
         XNamespace cac, XNamespace cbc, string id, string? uuid, string? embeddedValue)
     {
+        var isQr = string.Equals(id, "QR", StringComparison.OrdinalIgnoreCase);
+        var payload = embeddedValue ?? string.Empty;
+        var includeAttachment = isQr || !string.IsNullOrWhiteSpace(embeddedValue);
+
         return new XElement(cac + "AdditionalDocumentReference",
             new XElement(cbc + "ID", id),
             string.IsNullOrWhiteSpace(uuid) ? null : new XElement(cbc + "UUID", uuid),
-            new XElement(cac + "Attachment",
-                new XElement(cbc + "EmbeddedDocumentBinaryObject",
-                    new XAttribute("mimeCode", "text/plain"),
-                    embeddedValue ?? string.Empty)));
+            includeAttachment
+                ? new XElement(cac + "Attachment",
+                    new XElement(cbc + "EmbeddedDocumentBinaryObject",
+                        new XAttribute("mimeCode", "text/plain"),
+                        payload))
+                : null);
+    }
+
+    /// <summary>
+    /// The invoice digest excludes the QR reference, so updating only the QR payload after signing
+    /// does not invalidate the XML signature while aligning TLV tag 7 with <c>ds:SignatureValue</c>.
+    /// </summary>
+    private static string ReplaceQrEmbeddedPayload(string signedXml, string newQrBase64)
+    {
+        var doc = new XmlDocument { PreserveWhitespace = true };
+        doc.LoadXml(signedXml);
+        var ns = new XmlNamespaceManager(doc.NameTable);
+        ns.AddNamespace("cac", "urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2");
+        ns.AddNamespace("cbc", "urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2");
+        var node = doc.SelectSingleNode(
+            "//cac:AdditionalDocumentReference[cbc:ID='QR']//cbc:EmbeddedDocumentBinaryObject",
+            ns);
+        if (node is null)
+            throw new InvalidOperationException("Could not find QR EmbeddedDocumentBinaryObject in signed XML.");
+        node.InnerText = newQrBase64;
+        return doc.OuterXml;
     }
 
     // ── Calculation helpers ──────────────────────────────────────────────────────────────
