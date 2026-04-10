@@ -1,95 +1,70 @@
-﻿using System.Text;
+﻿using System.Globalization;
+using System.Text;
 
 namespace ZatcaFatooraDotNet8Sample.Services;
 
+/// <summary>
+/// ZATCA QR TLV per <c>QRCodeCreation.pdf</c> (ZATCA):
+/// <list type="bullet">
+/// <item><description>Tag: one byte</description></item>
+/// <item><description>Length: one byte — length of the byte array produced by UTF-8 encoding the field value</description></item>
+/// <item><description>Value: UTF-8 bytes of the field value. Tags 1–5 and 6–7 are UTF-8 text; tags 8–9 are raw key/signature bytes (decoded from Base64).</description></item>
+/// </list>
+/// Final QR payload is Base64(concatenated TLV bytes). Max ~500 characters in typical use.
+/// Tag 3 time stamp example from the spec: <c>2022-04-25T15:30:00Z</c>.
+/// </summary>
 public sealed class InvoiceQrService
 {
-    /// <summary>
-    /// Builds the ZATCA QR code TLV payload (base64-encoded) per the e-invoicing specification.
-    ///
-    /// Tag layout:
-    ///   1 = Seller name (UTF-8)
-    ///   2 = Seller VAT registration number
-    ///   3 = Invoice timestamp  — MUST match IssueDate + IssueTime in the XML exactly
-    ///   4 = Total with VAT (2 decimal places)
-    ///   5 = VAT total (2 decimal places)
-    ///   6 = Invoice hash (base64) — for simplified invoices
-    ///   7 = ECDSA signature value (base64) — ds:SignatureValue from the signed XML
-    ///   8 = ECDSA public key (uncompressed point, base64) — from the compliance certificate
-    ///   9 = Certificate SHA-256 hash (base64) — SHA256(certificate.RawData)
-    /// </summary>
     public string BuildBase64(
-        string sellerName,
-        string sellerVatNumber,
-        DateTimeOffset issueDateTime,
-        decimal totalWithVat,
-        decimal vatTotal,
-        string? invoiceHashBase64 = null,
-        string? signatureBase64 = null,
-        string? publicKeyBase64 = null,
-        string? certificateSignatureBase64 = null)
+    string sellerName,
+    string sellerVatNumber,
+    DateTimeOffset issueDateTime,
+    decimal totalWithVat,
+    decimal vatTotal,
+    string? invoiceHashBase64 = null,
+    string? signatureBase64 = null,
+    string? ecdsaPublicKeyBase64 = null,
+    string? certificateStampSignatureBase64 = null)
     {
         using var buffer = new MemoryStream();
 
-        WriteTag(buffer, 1, sellerName);
-        WriteTag(buffer, 2, sellerVatNumber);
+        // Tags 1-5: Write as UTF-8 Strings
+        WriteTag(buffer, 1, Encoding.UTF8.GetBytes(sellerName));
+        WriteTag(buffer, 2, Encoding.UTF8.GetBytes(sellerVatNumber));
 
-        // FIX invoiceTimeStamp_QRCODE_INVALID:
-        // Tag 3 MUST be the exact UTC timestamp that was written into IssueDate/IssueTime
-        // of the invoice XML. Both places use issueDateTime.UtcDateTime, so they always match.
-        // Format: "yyyy-MM-ddTHH:mm:ssZ" — the trailing 'Z' is required by ZATCA.
-        WriteTag(buffer, 3, issueDateTime.UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ssZ"));
+        // Ensure timestamp is exactly ISO 8601: yyyy-MM-ddTHH:mm:ssZ
+        var stamp = issueDateTime.UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture);
+        WriteTag(buffer, 3, Encoding.UTF8.GetBytes(stamp));
 
-        WriteTag(buffer, 4, totalWithVat.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture));
-        WriteTag(buffer, 5, vatTotal.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture));
+        WriteTag(buffer, 4, Encoding.UTF8.GetBytes(totalWithVat.ToString("0.00", CultureInfo.InvariantCulture)));
+        WriteTag(buffer, 5, Encoding.UTF8.GetBytes(vatTotal.ToString("0.00", CultureInfo.InvariantCulture)));
 
-        // Tags 6-9 are only written for simplified invoices (they are absent for standard).
+        // Tags 6–7: UTF-8 of the Base64 *text* (same as zatca-xml-js TLV: Buffer.from(string)).
+        // Raw SHA-256 / signature bytes in TLV cause invoiceHash_QRCODE_INVALID / INVOICE_SIGNATURE_VALUE_QRCODE_INVALID.
         if (!string.IsNullOrWhiteSpace(invoiceHashBase64))
-            WriteTag(buffer, 6, invoiceHashBase64);
+            WriteTag(buffer, 6, Encoding.UTF8.GetBytes(invoiceHashBase64.Trim()));
 
         if (!string.IsNullOrWhiteSpace(signatureBase64))
-            WriteTag(buffer, 7, signatureBase64);
+            WriteTag(buffer, 7, Encoding.UTF8.GetBytes(signatureBase64.Trim()));
 
-        if (!string.IsNullOrWhiteSpace(publicKeyBase64))
-            WriteTag(buffer, 8, publicKeyBase64);
+        // Tag 8: Public Key (Raw bytes, not text)
+        if (!string.IsNullOrWhiteSpace(ecdsaPublicKeyBase64))
+            WriteTag(buffer, 8, Convert.FromBase64String(ecdsaPublicKeyBase64.Trim()));
 
-        if (!string.IsNullOrWhiteSpace(certificateSignatureBase64))
-            WriteTag(buffer, 9, certificateSignatureBase64);
+        // Tag 9: Certificate Signature (Raw bytes, not text)
+        if (!string.IsNullOrWhiteSpace(certificateStampSignatureBase64))
+            WriteTag(buffer, 9, Convert.FromBase64String(certificateStampSignatureBase64.Trim()));
 
         return Convert.ToBase64String(buffer.ToArray());
     }
 
-    private static void WriteTag(Stream stream, byte tag, string value)
+    private static void WriteTag(Stream stream, byte tag, byte[] value)
     {
-        var valueBytes = Encoding.UTF8.GetBytes(value);
+        if (value.Length > 255)
+            throw new InvalidOperationException($"Tag {tag} length exceeds 255 bytes.");
+
         stream.WriteByte(tag);
-        WriteLength(stream, valueBytes.Length);
-        stream.Write(valueBytes, 0, valueBytes.Length);
-    }
-
-    /// <summary>
-    /// Writes a BER/DER length field.
-    /// Lengths ≤ 127 use the short (1-byte) form.
-    /// Longer lengths use the multi-byte long form: 0x80|n followed by n big-endian bytes.
-    /// </summary>
-    private static void WriteLength(Stream stream, int length)
-    {
-        if (length <= 127)
-        {
-            stream.WriteByte((byte)length);
-            return;
-        }
-
-        var bytes = new List<byte>();
-        var remaining = length;
-        while (remaining > 0)
-        {
-            bytes.Insert(0, (byte)(remaining & 0xFF));
-            remaining >>= 8;
-        }
-
-        stream.WriteByte((byte)(0x80 | bytes.Count));
-        foreach (var b in bytes)
-            stream.WriteByte(b);
+        stream.WriteByte((byte)value.Length);
+        stream.Write(value, 0, value.Length);
     }
 }
