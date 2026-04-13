@@ -39,7 +39,7 @@ public sealed class InvoicesController : ControllerBase
             Uuid = result.Uuid,
             InvoiceCounterValue = result.InvoiceCounterValue,
             PreviousInvoiceHashBase64 = result.PreviousInvoiceHashBase64,
-            InvoiceHashBase64 = result.InvoiceHashBase64,
+            InvoiceHash = result.InvoiceHashBase64,
             SignatureBase64 = result.SignatureBase64,
             QrCodeBase64 = result.QrCodeBase64,
             SignedXml = result.SignedXml,
